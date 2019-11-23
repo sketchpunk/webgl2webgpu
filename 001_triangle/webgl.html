@@ -1,0 +1,253 @@
+<html><body>
+<canvas id="pg_canvas" width="300" height="300" style="border:1px solid red;"></canvas>
+<script>
+	window.addEventListener( "load", _=>init() );
+
+	//##########################################################
+	let ANGLE = 0,
+		ubo, shader, mesh;
+
+	async function init(){
+		await Api.init();
+
+		ubo		= new Ubo();
+		shader	= Shader.mk( SRC_VERT, SRC_FRAG, ubo );
+		mesh	= Mesh.mk( new Float32Array([0.0, 0.5, -0.5, -0.5, 0.5, -0.5]) );
+
+		// ubo.update( 10 * Math.PI / 180 );
+  		render();
+	}
+
+
+	const POSITION_LOC = 0;	// Shader Attribute Location
+	function render(){
+		let gl = Api.ctx;
+		ubo.update( ANGLE += 0.01 );
+
+		Api.render_begin();
+		
+		Api.ctx.useProgram( shader.program );
+
+		// Without VAO
+		gl.bindBuffer( gl.ARRAY_BUFFER, mesh.buf_vert );
+		gl.enableVertexAttribArray( POSITION_LOC );
+		gl.vertexAttribPointer( POSITION_LOC, mesh.elm_len, 
+			gl.FLOAT, false, 0, 0 );
+		gl.bindBuffer( gl.ARRAY_BUFFER, null );
+		gl.drawArrays( gl.TRIANGLES, 0, mesh.elm_cnt );
+
+		// With VAO;
+		// Api.ctx.bindVertexArray( vao );
+		// Api.ctx.drawArrays( Api.ctx.TRIANGLES, 0, mesh.elm_cnt );
+
+		gl.useProgram( null );
+		
+		window.requestAnimationFrame( render );
+	}
+
+	//##########################################################
+	class Api{
+
+		// INITIATE THE GRAPHIC API
+		static async init( canvas_id="pg_canvas" ){
+			this.canvas	= document.getElementById( canvas_id );
+			this.ctx	= this.canvas.getContext("webgl2");
+
+			//Setup some defaults
+			let c = this.ctx;
+			c.cullFace(		c.BACK );		// Back is also default
+			c.frontFace(	c.CCW );		// Dont really need to set it, its ccw by default.
+			c.enable( 		c.DEPTH_TEST );	// Shouldn't use this, use something else to add depth detection
+			c.enable( 		c.CULL_FACE );	// Cull back face, so only show triangles that are created clockwise
+			c.depthFunc( 	c.LEQUAL );		// Near things obscure far things
+			c.blendFunc( 	c.SRC_ALPHA,	// Setup default alpha blending
+							c.ONE_MINUS_SRC_ALPHA);
+		}
+
+		// Steps to take before rendering a frame
+		static render_begin(){
+			// The only thing we need to do is clear our
+			// frame buffer
+			Api.ctx.clear( Api.ctx.COLOR_BUFFER_BIT | Api.ctx.DEPTH_BUFFER_BIT );
+		}
+	}
+
+	Api.canvas 		= null;		// HTML Canvas
+	Api.ctx			= null;		// Canvas Context
+
+	//##########################################################
+	
+	// Uniform Buffer Object
+	class Ubo{
+		constructor(){
+			let gl = Api.ctx;
+
+			// uniform{ float angle }
+			// Ubo Buffers must be created as groups of 16 bytes (16 Byte Aligned)
+			this.data		= new Float32Array( [0, 0, 0, 0] ); 
+			this.buf 		= Api.ctx.createBuffer();
+			this.bind_pnt 	= 0;
+
+			gl.bindBuffer( gl.UNIFORM_BUFFER, this.buf ); 								// Bind it for work
+			gl.bufferData( gl.UNIFORM_BUFFER, this.data.byteLength, gl.DYNAMIC_DRAW ); 	// Allocate Space in empty buf
+			gl.bindBuffer( gl.UNIFORM_BUFFER, this.buf );								// Unbind
+			gl.bindBufferBase( gl.UNIFORM_BUFFER, this.bind_pnt, this.buf );			// Save Buffer to Uniform Buffer Bind point
+		}
+
+		update( v ){
+			let gl = Api.ctx;
+			this.data[ 0 ] = v;
+
+			gl.bindBuffer( gl.UNIFORM_BUFFER, this.buf ); 
+			gl.bufferSubData( gl.UNIFORM_BUFFER, 0, 
+				this.data, 0,
+				this.data.length
+			);
+			gl.bindBuffer( gl.UNIFORM_BUFFER, null );
+		}
+	}
+
+	//##########################################################
+	class Shader{
+		constructor(){
+			this.program = null;
+		}
+
+		static mk( vert_src, frag_src, ubo ){
+			//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+			// Compile Vertex Shader
+			let sh_vert = Api.ctx.createShader( Api.ctx.VERTEX_SHADER );
+			Api.ctx.shaderSource( sh_vert, vert_src );
+			Api.ctx.compileShader( sh_vert );
+
+			//Get Error data if shader failed compiling
+			if( !Api.ctx.getShaderParameter( sh_vert, Api.ctx.COMPILE_STATUS ) ){
+				console.error("Error compiling shader : " + sh_vert, Api.ctx.getShaderInfoLog( sh_vert ) );
+				Api.ctx.deleteShader( sh_vert );
+				return null;
+			}
+
+			//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+			// Compile Fragment Shader
+			let sh_frag = Api.ctx.createShader( Api.ctx.FRAGMENT_SHADER );
+			Api.ctx.shaderSource( sh_frag, frag_src );
+			Api.ctx.compileShader( sh_frag );
+
+			//Get Error data if shader failed compiling
+			if( !Api.ctx.getShaderParameter( sh_frag, Api.ctx.COMPILE_STATUS ) ){
+				console.error("Error compiling shader : " + sh_frag, Api.ctx.getShaderInfoLog( sh_frag ) );
+				Api.ctx.deleteShader( sh_frag );
+				Api.ctx.deleteShader( sh_vert );
+				return null;
+			}
+
+			//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+			// Link shaders together
+			let prog = Api.ctx.createProgram();
+			Api.ctx.attachShader( prog, sh_vert );
+			Api.ctx.attachShader( prog, sh_frag );
+
+			//Force predefined locations for specific attributes. If the attibute isn't used in the shader its location will default to -1
+			//ctx.bindAttribLocation(prog,ATTR_POSITION_LOC,ATTR_POSITION_NAME);
+			//ctx.bindAttribLocation(prog,ATTR_NORMAL_LOC,ATTR_NORMAL_NAME);
+			//ctx.bindAttribLocation(prog,ATTR_UV_LOC,ATTR_UV_NAME);
+
+			Api.ctx.linkProgram( prog );
+
+			// Check if successful
+			if( !Api.ctx.getProgramParameter(prog, Api.ctx.LINK_STATUS) ){
+				console.error("Error creating shader program.", Api.ctx.getProgramInfoLog( prog ) );
+				Api.ctx.detachShader( prog, sh_vert );
+				Api.ctx.detachShader( prog, sh_frag );
+				Api.ctx.deleteShader( sh_vert );
+				Api.ctx.deleteShader( sh_frag );
+				Api.ctx.deleteProgram( prog );
+
+				return null;
+			}
+
+			// EXTRA Validation, Optional to do it.
+			Api.ctx.validateProgram( prog );
+			if( !Api.ctx.getProgramParameter( prog, Api.ctx.VALIDATE_STATUS ) ){
+				console.error("Error validating program", Api.ctx.getProgramInfoLog( prog ) );
+				Api.ctx.detachShader( prog, sh_vert );
+				Api.ctx.detachShader( prog, sh_frag );
+				Api.ctx.deleteShader( sh_vert );
+				Api.ctx.deleteShader( sh_frag );
+				Api.ctx.deleteProgram( prog );
+				return null;
+			}
+		
+			// Can delete the shaders since the program has been made.
+			// Detaching might cause issues on some browsers, Might only need to delete.
+			Api.ctx.detachShader( prog, sh_vert );
+			Api.ctx.detachShader( prog, sh_frag );
+			Api.ctx.deleteShader( sh_vert );
+			Api.ctx.deleteShader( sh_frag );
+
+			//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+			// Check if UBO exists in the shader
+			let bind_idx = Api.ctx.getUniformBlockIndex( prog, "Uniforms" );
+			if( bind_idx > 1000 ) console.error("Uniform Buffer not found in shader"); 
+			Api.ctx.uniformBlockBinding( prog, bind_idx, ubo.bind_pnt );
+
+			//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+			let shader = new Shader();
+			shader.program = prog;
+			return shader;
+		}
+	}
+
+	//##########################################################
+	// IN WebGL 2, we have access to VAO, which lets us setup
+	// all the buffers to Attribute Locations to easily bind the
+	// data to a shader but since WebGPU has no concept of that, we
+	// will need to do it without VAOs.
+	class Mesh{
+		constructor(){
+			this.buf_vert	= null;		// Reference to GPU Buffer
+			this.elm_cnt	= 0;		// How many Vertices in buffer
+			this.elm_len	= 0;		// How Many Floats make up one Element
+		}
+
+		static mk( vert_ary, elm_len=2 ){
+			let mesh = new Mesh();
+			let gl = Api.ctx;
+			mesh.elm_len 	= elm_len;						// Vec2, so only 2 Floats
+			mesh.elm_cnt	= vert_ary.length / elm_len;	// How many Vertices
+			mesh.buf_vert	= gl.createBuffer();
+
+			gl.bindBuffer( gl.ARRAY_BUFFER, mesh.buf_vert );
+			gl.bufferData( gl.ARRAY_BUFFER, vert_ary, gl.STATIC_DRAW );
+			gl.bindBuffer( gl.ARRAY_BUFFER, null );
+
+			return mesh;
+		}
+	}
+
+	//##########################################################
+	const SRC_VERT = `#version 300 es
+			layout(location = 0) in vec2 position;
+
+		uniform Uniforms{
+			float angle;
+		} uniforms;
+
+		vec2 vec2_rot( vec2 v, float a ){
+			float s = sin( a );
+			float c = cos( a );
+			return vec2( v.x * c - v.y * s, v.x * s + v.y * c );
+		}
+
+		void main(){
+  			gl_Position = vec4( vec2_rot( position, uniforms.angle ), 0.0, 1.0 );
+		}`;
+
+	const SRC_FRAG = `#version 300 es
+		precision mediump float;
+		out vec4 outColor;
+		void main() { outColor = vec4(1.0, 0.0, 0.0, 1.0); }`;
+
+</script>
+</body>
+</html>

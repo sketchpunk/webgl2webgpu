@@ -1,0 +1,355 @@
+<html><body>
+<canvas id="pg_canvas" width="300" height="300" style="border:1px solid red;"></canvas>
+<script>
+	window.addEventListener( "load", _=>init() );
+
+	//##########################################################
+	let ANGLE = 0,
+		ubo, shader, mesh;
+
+	async function init(){
+		await Api.init();
+
+		ubo		= new Ubo();
+		shader	= Shader.mk( SRC_VERT, SRC_FRAG, ubo );
+		mesh	= Mesh.mk( new Float32Array([0.0, 0.5, -0.5, -0.5, 0.5, -0.5]) );
+
+		// ubo.update( 10 * Math.PI / 180 );
+  		render();
+	}
+
+
+	const POSITION_LOC = 0; // Shader Attribute Location
+	const UNIFORM_BIND = 0;	// Uniform Buffer Binding Point
+	function render(){
+		ubo.update( ANGLE += 0.01 );
+
+		Api.render_begin();
+
+  		Api.pass_encoder.setPipeline( shader.pipe_line );
+  		Api.pass_encoder.setBindGroup( UNIFORM_BIND, ubo.bind_group );
+  		Api.pass_encoder.setVertexBuffer( POSITION_LOC, mesh.buf_vert );
+  		Api.pass_encoder.draw( mesh.elm_cnt, 1, 0, 0 );
+  		
+  		Api.render_end();
+
+  		window.requestAnimationFrame( render );
+	}
+
+	//##########################################################
+	class Api{
+
+		// INITIATE THE GRAPHIC API
+		static async init( canvas_id="pg_canvas" ){
+			// Compile GLSL into SPIR-V
+			// WebGPU does not have a Shader Language yet plus Shaders
+			// exist as ByteCode in WebGPU, so we can download a GLSL compiler
+			// that will turn our code into SPIR-V Byte Code. This is pretty cool
+			// because you can cache the compiled shader and save that for production
+			// instead of compiling shaders every time a page is loaded
+			let glslang		= await import("https://unpkg.com/@webgpu/glslang@0.0.9/dist/web-devel/glslang.js");
+
+			// Adapter is like a Graphics Driver, So its looking for
+			// one that will work with webgpi
+			this.adapter	= await navigator.gpu.requestAdapter();
+
+			// Device is an instance of the driver, like creating
+			// a new instance of an object. Device will hold most of our
+			// Graphics API methods, where webgl it was in the canvas context
+			this.device		= await this.adapter.requestDevice();
+			
+			this.glsl		= await glslang.default();
+			
+			// Just like WebGL, we use the HTML Canvas to draw,
+			// It uses a new context name. So far the only thing
+			// the canvas is for is to configure the swap chain.	
+			this.canvas 	= document.getElementById( canvas_id );
+			this.ctx 		= this.canvas.getContext( "gpupresent" );
+
+			// WebGPU doesn't give you a framebuffer all setuo for you to use
+			// Need to configure one to suit what you need. By default you
+			// only get a color buffer but you need to set the byte format for it.
+			// rgba8unorm : Storing 4 Unsigned Normalized 32 bit Floats
+			// No depth buffer by default, you'll need to set that up yourself if you
+			// need that.
+			this.swap_chain	= this.ctx.configureSwapChain({
+				device	: this.device,
+				format	: this.tex_format,
+			});
+
+			// Depth buffer is just a texture.
+			this.depth_buffer = this.device.createTexture({
+				size: { width: 300, height: 300, depth: 1 },
+				format: Api.depth_format,
+				usage: GPUTextureUsage.OUTPUT_ATTACHMENT
+			});
+			
+
+			//console.log("Adapter Name:", this.adapter.name );
+		}
+
+
+		// Steps to take before rendering a frame
+		static render_begin(){
+			// https://developer.apple.com/documentation/metal/mtlcommandencoder
+			// https://vulkan-tutorial.com/Drawing_a_triangle/Drawing/Command_buffers
+			// Get a Command Buffer, This is where we create all the commands we want to
+			// execute on the gpu.
+      		this.cmd_encoder = this.device.createCommandEncoder( {} ); // Create Command Buffer
+
+      		// Get the next frame buffer that we can use to render
+      		// the next frame
+      		this.render_pass_descriptor
+      			.colorAttachments[0]
+      			.attachment = this.swap_chain.getCurrentTexture().createView();
+
+      		// Attach a new view to store the depth buffer info
+      		this.render_pass_descriptor
+      			.depthStencilAttachment
+      			.attachment = Api.depth_buffer.createView();
+			
+      		// Start a Shader Command
+      		this.pass_encoder = this.cmd_encoder.beginRenderPass( this.render_pass_descriptor ); // Kinda like setting up a single Shader Excution Command
+		}
+
+		// Steps to take after rendering a frame
+		static render_end(){
+			// End a Shader Command
+			Api.pass_encoder.endPass();
+
+			// Close our command buffer, then send it to the queue
+			// to execute all the commands we created.
+			this.device
+				.defaultQueue
+				.submit([ this.cmd_encoder.finish() ]); // Send Command Buffer to execute
+
+  			// this.device.getQueue().submit( [ this.cmd_encoder.finish() ] );	ORIGINAL
+  			
+  			this.cmd_encoder	= null;
+  			this.pass_encoder	= null;
+		}
+	}
+
+	Api.canvas 		= null;		// HTML Canvas
+	Api.ctx			= null;		// Canvas Context
+	Api.adapter		= null;		// Graphic Driver
+	Api.device 		= null;		// Instance of the Graphics Driver
+	Api.compiler	= null;		// Compile our shader into ByteCode
+	Api.swap_chain	= null;		// This is our frame buffer
+
+	Api.cmd_encoder	= null;
+	Api.pass_encoder = null;
+
+	Api.bg_color	= { r:1.0, g:1.0, b:1.0, a:1.0 };	// Default color to set new frame.
+
+	// https://gpuweb.github.io/gpuweb/#enumdef-gputextureformat
+	// Like telling how we want the data layed out in the swap-chain texture (frame buffer)
+	Api.tex_format = "rgba8unorm"; //RGBA 32bit unsigned normalized value
+	Api.depth_format = "depth24plus-stencil8";
+
+	Api.depth_buffer = null;
+
+	// Frame Buffer Configuration to be Passed to Render Pass 
+	Api.render_pass_descriptor = {
+		colorAttachments: [{ 
+			attachment	: null,			// Reference to Color Buffer
+          	loadValue	: Api.bg_color,	// Initial Colors
+        }]
+
+        // Just like Color Buffer, need to create a new depth view and attach
+        // it to the descripter.
+        ,depthStencilAttachment:{
+        	attachment: null,		
+        	depthLoadValue: 1.0,
+        	depthStoreOp: "store",
+        	stencilLoadValue: 0,
+        	stencilStoreOp: "store"
+        }
+	};
+
+
+	//##########################################################
+	
+	// Uniform Buffer Object
+	class Ubo{
+		constructor(){
+			// uniform{ float angle }
+			this.data	= new Float32Array( [0] );
+
+			// https://gpuweb.github.io/gpuweb/#dictdef-gpubufferdescriptor
+			this.buf	= Api.device.createBuffer({
+				size 	: 4,
+				usage 	: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+			});
+
+			//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+			// https://gpuweb.github.io/gpuweb/#enumdef-gpubindingtype
+			// No Support yet for simple types like Floats, Vec2-3-4, mat4x4, etc
+			// So to pass data to a Pipeline(shader), the only way is through a Uniform Buffer.
+
+			// Layout is for the shader.
+			// https://gpuweb.github.io/gpuweb/#dom-gpudevice-createbindgrouplayout
+			this.bind_layout = Api.device.createBindGroupLayout({ bindings:[
+				{ binding: 0, visibility: GPUShaderStage.VERTEX, type: "uniform-buffer" }
+			]});
+
+			// But When rendering, we need a bind group that links the layout
+			// to the actual data buffer.
+			// https://gpuweb.github.io/gpuweb/#bind-groups
+			this.bind_group = Api.device.createBindGroup({
+				layout		: this.bind_layout,
+				bindings	: [
+					{ binding:0, resource:{ buffer:this.buf } }
+				]
+			});
+		}
+
+		update( v ){
+			this.data[ 0 ] = v;
+			this.buf.setSubData( 0, this.data );
+		}
+	}
+
+	//##########################################################
+	/*
+	When it comes to shaders, we need to think about them differently. In GPU,
+	we have fine grain configurations on how a shader will run and what it uses.
+	This can be a bit much and complicate some things that was easier in WebGL,
+	but you would just setup a small collection of specific configurations that 
+	you need then reuse them for all your shader modules that you'd write.
+
+	Like if you have a simple shader that applies only a base color, BUT if you 
+	want to render a triangle or a line, you will need to create two configurations.
+	This is the case because drawMode is no longer something that can be changed during
+	rendering, it is preconfigured into your pipeline. So for this case, You will have
+	one set of Shader Modules, but two pipelines created from them to handle the
+	different draw modes.
+	*/
+	class Shader{
+		constructor(){
+			this.pipe_line			= null;	// Like our Shader Linked Program
+			//this.bind_grp_layout	= null;
+		}
+
+		static mk( vert_src, frag_src, ubo ){
+			//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+			// Compile and Create Shader Modules
+			let byte_vert	= Api.glsl.compileGLSL( vert_src, "vertex" ),
+				byte_frag	= Api.glsl.compileGLSL( frag_src, "fragment" ),
+				
+				// Shaders are setup as Modules, Just pass in Byte Code.
+				mod_vert	= {
+					module		: Api.device.createShaderModule({ code:byte_vert }),
+					entryPoint	: "main" 
+				},
+
+				mod_frag 	= {
+					module		: Api.device.createShaderModule({ code:byte_frag }),
+					entryPoint	: "main"
+				};
+
+			// TODO, WebGL has lots of Error Checking Functionality
+			// Need to learn if similar things exist to make sure
+			// shaders and pipelines are well created before use.
+
+        	//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+        	// Define the Render Pipeline
+			//https://gpuweb.github.io/gpuweb/#primitive-topology
+
+			// The layout of Uniform data that will be bound to the shader
+			let pl_layout = Api.device.createPipelineLayout({ bindGroupLayouts:[ ubo.bind_layout ] });
+
+			// This is how a shader is put together.
+			// Define all the Attributes & Uniforms, Draw Mode and Linking the
+			// Shader Modules together.
+			// https://gpuweb.github.io/gpuweb/#gpurenderpipeline
+			let pipe_line = Api.device.createRenderPipeline({
+				layout				: pl_layout, //Required
+				vertexStage			: mod_vert,
+				fragmentStage		: mod_frag,
+
+				// This is like the draw mode from WEBGL
+				primitiveTopology	: "triangle-list",
+
+				// How to save the pixels to the frame buffer
+      			colorStates			: [ { format:Api.tex_format } ],
+
+      			// Tell Pipeline to Use the depth buffer
+      			depthStencilState 	: {
+					depthWriteEnabled	: true,
+					depthCompare		: "less",
+					format				: Api.depth_format,
+				},
+
+      			// Setting up Vertex Attributes
+				vertexState : {
+					vertexBuffers : [
+						{	arrayStride	: 8, // Vertex data Length in Bytes, 2 floats * 4 Bytes
+							attributes	: [ { shaderLocation : 0, offset : 0, format : "float2" } ]
+						}
+					]
+				}
+			});
+
+			//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+			let shader = new Shader();
+			shader.pipe_line = pipe_line;
+			return shader;
+		}
+	}
+
+	//##########################################################
+	// Creating a Mesh is the same concept, Get a Typed Array of
+	// Flat Vertex/Index data, create a buffer, pass data to it.
+	// Keep Track of how many ELEMENTS in the buffer, not the byte size.
+	// Like How many Vertices exist in this float32array
+	class Mesh{
+		constructor(){
+			this.buf_vert	= null;		// Reference to GPU Buffer
+			this.elm_cnt	= 0;		// How many Vertices in buffer
+		}
+
+		static mk( vert_ary, elm_len=2 ){
+			let mesh = new Mesh();
+
+			mesh.buf_vert = Api.device.createBuffer({
+				size	: vert_ary.byteLength,
+				usage 	: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+			});
+
+			mesh.buf_vert.setSubData( 0, vert_ary );
+			mesh.elm_cnt = vert_ary.length / elm_len;	// How Many Vertices
+
+			return mesh;
+		}
+	}
+
+	//##########################################################
+	// Descriptor Sets For Layout
+	// https://vulkan.lunarg.com/doc/view/1.0.33.0/linux/vkspec.chunked/ch13s02.html
+
+	const SRC_VERT = `#version 450
+		layout(location = 0) in vec2 position;
+
+		layout(set = 0, binding = 0) uniform Uniforms {
+			float angle;
+		} uniforms;
+
+		vec2 vec2_rot( vec2 v, float a ){
+			float s = sin( a );
+			float c = cos( a );
+			return vec2( v.x * c - v.y * s, v.x * s + v.y * c );
+		}
+
+		void main(){
+  			gl_Position = vec4( vec2_rot( position, uniforms.angle ), 0.0, 1.0 );
+		}`;
+
+	const SRC_FRAG = `#version 450
+		layout(location = 0) out vec4 outColor;
+		void main() { outColor = vec4(1.0, 0.0, 0.0, 1.0); }`;
+
+</script>
+
+</body>
+</html>
